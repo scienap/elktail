@@ -48,7 +48,7 @@ var confDir = ".elktail"
 var defaultConfFile = "default.json"
 
 //When changing this array, make sure to also make appropriate changes in CopyConfigRelevantSettingsTo
-var configRelevantFlags = []string{"url", "f", "i", "t", "u", "ssh"}
+var configRelevantFlags = []string{"url", "f", "i", "t", "u", "ssh", "raw"}
 
 
 
