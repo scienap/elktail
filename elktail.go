@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/codegangsta/cli"
-	"github.com/olivere/elastic/v7"
+	"github.com/olivere/elastic"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/net/context"
 )
