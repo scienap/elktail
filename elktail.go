@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urfave/cli"
+	"github.com/codegangsta/cli"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/net/context"
 	"gopkg.in/olivere/elastic.v7"
