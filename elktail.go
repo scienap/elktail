@@ -10,10 +10,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/urfave/cli"
-	"golang.org/x/crypto/ssh/terminal"
-	"golang.org/x/net/context"
-	"gopkg.in/olivere/elastic.v5"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -21,6 +17,11 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/urfave/cli"
+	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/net/context"
+	"gopkg.in/olivere/elastic.v7"
 )
 
 //
@@ -90,7 +91,7 @@ func NewTail(configuration *Configuration) *Tail {
 	if cert != "" && key != "" {
 		cert, err := tls.LoadX509KeyPair(cert, key)
 		if err != nil {
-		    Error.Fatalf("Bad certificate and/or key: %s", err)
+			Error.Fatalf("Bad certificate and/or key: %s", err)
 		}
 		tlsConfig := &tls.Config{
 			Certificates: []tls.Certificate{cert},
@@ -160,7 +161,7 @@ func (tail *Tail) selectIndices(configuration *Configuration) {
 }
 
 // Start the tailer
-func (tail *Tail) Start(follow bool, initialEntries int) {
+func (tail *Tail) Start(follow bool, initialEntries int, ctx cli.Context) {
 	result, err := tail.initialSearch(initialEntries)
 	if err != nil {
 		Error.Fatalln("Error in executing search query.", err)
@@ -168,16 +169,9 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 	tail.processResults(result)
 	delay := 500 * time.Millisecond
 	for follow {
-		time.Sleep(delay)
 		if tail.lastTimeStamp != "" {
 			//we can execute follow up timestamp filtered query only if we fetched at least 1 result in initial query
-			result, err = tail.client.Search().
-				Index(tail.indices...).
-				Sort(tail.queryDefinition.TimestampField, false).
-				From(0).
-				Size(9000). //TODO: needs rewrite this using scrolling, as this implementation may loose entries if there's more than 9K entries per sleep period
-				Query(tail.buildTimestampFilteredQuery()).
-				Do(context.Background())
+			result, err = tail.followUpSearch(false)
 		} else {
 			//if lastTimeStamp is not defined we have to repeat the initial search until we get at least 1 result
 			result, err = tail.initialSearch(initialEntries)
@@ -193,6 +187,31 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 		} else if delay <= 2000*time.Millisecond {
 			delay = delay + 500*time.Millisecond
 		}
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			time.Sleep(delay)
+		}
+	}
+
+	// Returning all records when no follow is set
+	lastTimeStamp := tail.lastTimeStamp
+	for tail.lastTimeStamp != "" {
+		result, err = tail.followUpSearch(true)
+		tail.processResults(result)
+
+		if lastTimeStamp == tail.lastTimeStamp {
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			lastTimeStamp = tail.lastTimeStamp
+		}
 	}
 }
 
@@ -204,6 +223,15 @@ func (tail *Tail) initialSearch(initialEntries int) (*elastic.SearchResult, erro
 		Sort(tail.queryDefinition.TimestampField, tail.order).
 		Query(tail.buildSearchQuery()).
 		From(0).Size(initialEntries).
+		Do(context.Background())
+}
+
+func (tail *Tail) followUpSearch(order bool) (*elastic.SearchResult, error) {
+	return tail.client.Search().
+		Index(tail.indices...).
+		Sort(tail.queryDefinition.TimestampField, order).
+		Query(tail.buildTimestampFilteredQuery()).
+		From(0).Size(9000).
 		Do(context.Background())
 }
 
@@ -267,13 +295,13 @@ func drainOldEntries(entries *[]displayedEntry, cutOffTimestamp string) {
 
 func (tail *Tail) processHit(hit *elastic.SearchHit) map[string]interface{} {
 	var entry map[string]interface{}
-	err := json.Unmarshal(*hit.Source, &entry)
+	err := json.Unmarshal(hit.Source, &entry)
 	if err != nil {
 		Error.Fatalln("Failed parsing ElasticSearch response.", err)
 	}
 
 	if tail.queryDefinition.Raw {
-		fmt.Println(string(*hit.Source))
+		fmt.Println(string(hit.Source))
 	} else {
 		tail.printResult(entry)
 	}
@@ -405,7 +433,7 @@ func main() {
 	app.Version = VERSION
 	app.ArgsUsage = "[query-string]\n   Options marked with (*) are saved between invocations of the command. Each time you specify an option marked with (*) previously stored settings are erased."
 	app.Flags = config.Flags()
-	app.Action = func(c *cli.Context) {
+	app.Action = func(c *cli.Context) error {
 
 		if c.IsSet("help") {
 			cli.ShowAppHelp(c)
@@ -484,7 +512,7 @@ func main() {
 			if args.Present() {
 				if len(config.QueryDefinition.Terms) > 1 {
 					config.QueryDefinition.Terms = append(config.QueryDefinition.Terms, "AND")
-					config.QueryDefinition.Terms = append(config.QueryDefinition.Terms, args...)
+					config.QueryDefinition.Terms = append(config.QueryDefinition.Terms, args.Slice()...)
 				} else {
 					config.QueryDefinition.Terms = []string{args.First()}
 					config.QueryDefinition.Terms = append(config.QueryDefinition.Terms, args.Tail()...)
@@ -496,7 +524,8 @@ func main() {
 		//If we don't exit here we can save the defaults
 		configToSave.SaveDefault()
 
-		tail.Start(!config.IsListOnly(), config.InitialEntries)
+		tail.Start(!config.IsListOnly(), config.InitialEntries, *c)
+		return nil
 	}
 
 	app.Run(os.Args)
